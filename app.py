@@ -18,12 +18,6 @@ with st.sidebar:
     st.header("知识库管理")
     uploaded_file = st.file_uploader("上传PDF文件", type="pdf")
     
-    if uploaded_file:
-        st.success("文件已上传，处理中...")
-        # 显示进度条
-        progress = st.progress(0)
-        progress.progress(50)
-    
     # 显示使用说明
     st.markdown("""
     **使用指南**：
@@ -32,98 +26,93 @@ with st.sidebar:
     3. 查看AI回答及来源
     """)
 
-# 3. 安全获取API Key（从环境变量）
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+# 3. 获取 API Key（支持本地环境变量 + Streamlit Cloud 密钥）
+GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
 if not GOOGLE_API_KEY:
-    st.error("API Key未设置，请联系管理员")
+    st.error("❌ Google API Key 未设置，请在 Streamlit Cloud 中配置")
     st.stop()
 
-# 4. 优化的文件处理函数（内存存储）
-@st.cache_resource
+# 4. 优化的文件处理函数
+@st.cache_resource(show_spinner=False)
 def process_pdf(uploaded_file):
-    # 直接从内存读取PDF
-    pdf_stream = BytesIO(uploaded_file.getvalue())
-    loader = PyPDFLoader(pdf_stream)
-    documents = loader.load()
-    
-    # 文本切分
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(documents)
-    
-    # 创建向量数据库
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
-    
-    return vectorstore
+    try:
+        pdf_stream = BytesIO(uploaded_file.getvalue())
+        loader = PyPDFLoader(pdf_stream)
+        documents = loader.load()
+        
+        # 文本切分
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(documents)
+        
+        # 创建向量库
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
+        return vectorstore
+    except Exception as e:
+        st.error(f"PDF处理失败：{str(e)}")
+        return None
 
-# 5. 初始化模型（缓存优化）
-@st.cache_resource
+# 5. 初始化模型
+@st.cache_resource(show_spinner=False)
 def get_llm():
     return GoogleGenerativeAI(model="gemini-pro", temperature=0)
 
 # 6. 主逻辑
 if uploaded_file:
-    try:
-        # 获取向量数据库
+    with st.spinner("📄 正在处理PDF，请稍候..."):
         vectorstore = process_pdf(uploaded_file)
-        retriever = vectorstore.as_retriever()
-        
-        # 获取模型
-        llm = get_llm()
-        
-        # 定义提示词
-        system_prompt = (
-            "你是一个乐于助人的AI助手。请使用以下提供的上下文来回答用户的问题。"
-            "如果上下文中没有相关信息，请直接说你不知道，不要编造答案。"
-            "\n\n"
-            "{context}"
-        )
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}"),
-        ])
-        
-        # 构建问答链
-        question_answer_chain = create_stuff_documents_chain(llm, prompt)
-        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-        # 7. 聊天界面
-        st.header("开始提问")
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-
-        # 显示历史聊天记录
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-        # 处理用户输入
-        if prompt_input := st.chat_input("基于上传的文件提问..."):
-            # 显示用户问题
-            with st.chat_message("user"):
-                st.markdown(prompt_input)
-            st.session_state.messages.append({"role": "user", "content": prompt_input})
-
-            # 显示AI回答
-            with st.chat_message("assistant"):
-                with st.spinner("正在思考..."):
-                    response = rag_chain.invoke({"input": prompt_input})
-                    answer = response["answer"]
-                    st.markdown(answer)
-                    
-                    # 详细显示参考来源
-                    with st.expander("查看详细参考来源"):
-                        for i, doc in enumerate(response["context"]):
-                            st.markdown(f"**来源 #{i+1}** (页码: {doc.metadata.get('page', '未知')})")
-                            st.markdown(f"{doc.page_content[:300]}...")
     
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-    
-    except Exception as e:
-        st.error(f"处理过程中出错: {str(e)}")
+    if not vectorstore:
         st.stop()
+    
+    retriever = vectorstore.as_retriever()
+    llm = get_llm()
 
-# 8. 首次使用提示
+    # 提示词
+    system_prompt = """
+    你是一个专业的AI助手。
+    请根据提供的上下文回答问题。
+    如果不知道答案，请直接说“根据提供的文档，我无法回答这个问题”，不要编造。
+
+    上下文：
+    {context}
+    """
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ])
+
+    # 构建RAG链
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    # 聊天界面
+    st.header("💬 开始提问")
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt_input := st.chat_input("请输入你的问题..."):
+        with st.chat_message("user"):
+            st.markdown(prompt_input)
+        st.session_state.messages.append({"role": "user", "content": prompt_input})
+
+        with st.chat_message("assistant"):
+            with st.spinner("思考中..."):
+                response = rag_chain.invoke({"input": prompt_input})
+                answer = response["answer"]
+                st.markdown(answer)
+
+                with st.expander("📎 查看参考来源"):
+                    for i, doc in enumerate(response["context"]):
+                        st.markdown(f"**片段 {i+1}** | 页码：{doc.metadata.get('page', '未知')}")
+                        st.write(doc.page_content[:350] + "...")
+
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+
 else:
-    st.info("请先在左侧侧边栏上传PDF文件开始使用")
+    st.info("👈 请先在左侧上传 PDF 文件开始使用")
