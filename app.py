@@ -4,9 +4,10 @@ from langchain_google_genai import GoogleGenerativeAI, GoogleGenerativeAIEmbeddi
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 from io import BytesIO
 
 st.set_page_config(page_title="安全AI助手", page_icon="🔒")
@@ -66,8 +67,16 @@ if uploaded_file:
         ("human", "{input}"),
     ])
 
-    qa_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, qa_chain)
+    # 新版 LangChain 链式写法（不会报错！）
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    rag_chain = (
+        {"context": retriever | format_docs, "input": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
 
     st.header("💬 开始提问")
     if "messages" not in st.session_state:
@@ -84,14 +93,8 @@ if uploaded_file:
 
         with st.chat_message("assistant"):
             with st.spinner("思考中..."):
-                res = rag_chain.invoke({"input": user_input})
-                ans = res["answer"]
+                ans = rag_chain.invoke(user_input)
                 st.markdown(ans)
-
-                with st.expander("📎 参考来源"):
-                    for i, doc in enumerate(res["context"]):
-                        st.write(f"片段 {i+1} | 页码：{doc.metadata.get('page','未知')}")
-                        st.write(doc.page_content[:300] + "...")
 
         st.session_state.messages.append({"role": "assistant", "content": ans})
 
